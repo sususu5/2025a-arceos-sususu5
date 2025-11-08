@@ -163,11 +163,18 @@ pub fn stdout() -> Stdout {
 
 #[doc(hidden)]
 pub fn __print_impl(args: core::fmt::Arguments) {
+    const RED: &str = "\x1b[31m";
+    const GREEN: &str = "\x1b[32m";
+    const RESET: &str = "\x1b[0m";
     if cfg!(feature = "smp") {
         // synchronize using the lock in axlog, to avoid interleaving
         // with kernel logs
-        arceos_api::stdio::ax_console_write_fmt(args).unwrap();
+        arceos_api::stdio::ax_console_write_fmt(
+            format_args!("{}{}{}", RED, args, RESET)
+        ).unwrap();  
     } else {
-        stdout().lock().write_fmt(args).unwrap();
+        stdout().lock().write_fmt(
+            format_args!("{}{}{}", GREEN, args, RESET)
+        ).unwrap();
     }
 }
