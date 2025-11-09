@@ -166,15 +166,30 @@ pub fn __print_impl(args: core::fmt::Arguments) {
     const RED: &str = "\x1b[31m";
     const GREEN: &str = "\x1b[32m";
     const RESET: &str = "\x1b[0m";
-    if cfg!(feature = "smp") {
-        // synchronize using the lock in axlog, to avoid interleaving
-        // with kernel logs
-        arceos_api::stdio::ax_console_write_fmt(
-            format_args!("{}{}{}", RED, args, RESET)
-        ).unwrap();  
-    } else {
-        stdout().lock().write_fmt(
-            format_args!("{}{}{}", GREEN, args, RESET)
-        ).unwrap();
+
+    let color = if cfg!(feature = "smp") { RED } else { GREEN };
+
+    let write_fmt = |fmt_args: core::fmt::Arguments| {
+        if cfg!(feature = "smp") {
+            arceos_api::stdio::ax_console_write_fmt(fmt_args).unwrap();
+        } else {
+            use core::fmt::Write;
+            stdout().lock().write_fmt(fmt_args).unwrap();
+        }
+    };
+
+    #[cfg(feature = "alloc")]
+    {
+        use alloc::string::ToString;
+        let text = args.to_string();
+        if let Some(without_newline) = text.strip_suffix('\n') {
+            write_fmt(format_args!("{}{}{}\n", color, without_newline, RESET));
+        } else {
+            write_fmt(format_args!("{}{}{}", color, text, RESET));
+        }
+    }
+    #[cfg(not(feature = "alloc"))]
+    {
+        write_fmt(format_args!("{}{}{}", color, args, RESET));
     }
 }

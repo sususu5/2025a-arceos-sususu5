@@ -55,13 +55,60 @@ extern crate alloc;
 
 #[cfg(feature = "alloc")]
 #[doc(no_inline)]
-pub use alloc::{boxed, collections, format, string, vec};
+pub use alloc::{boxed, format, string, vec};
 
 #[doc(no_inline)]
 pub use core::{arch, cell, cmp, hint, marker, mem, ops, ptr, slice, str};
 
 #[macro_use]
 mod macros;
+
+#[cfg(feature = "alloc")]
+mod hash;
+
+#[cfg(feature = "alloc")]
+pub mod collections {
+    use core::hash::Hash;
+    use hashbrown::HashMap as RawHashMap;
+    use crate::hash::FnvBuildHasher;
+
+    pub struct HashMap<K, V>(RawHashMap<K, V, FnvBuildHasher>);
+
+    impl<K, V> HashMap<K, V> {
+        #[inline]
+        pub fn new() -> Self
+        where
+            K: Eq + Hash,
+        {
+            Self(RawHashMap::with_hasher(FnvBuildHasher::new()))
+        }
+
+        #[inline]
+        pub fn with_capacity(capacity: usize) -> Self
+        where
+            K: Eq + Hash,
+        {
+            Self(RawHashMap::with_capacity_and_hasher(capacity, FnvBuildHasher::new()))
+        }
+    }
+
+    // Implement Deref for HashMap, so that we can use all the methods of hashbrown::HashMap
+    impl<K, V> core::ops::Deref for HashMap<K, V> {
+        type Target = RawHashMap<K, V, FnvBuildHasher>;
+
+        #[inline]
+        fn deref(&self) -> &Self::Target {
+            &self.0
+        }
+    }
+
+    impl<K, V> core::ops::DerefMut for HashMap<K, V> {
+        #[inline]
+        fn deref_mut(&mut self) -> &mut Self::Target {
+            &mut self.0
+        }
+    }
+}
 
 pub mod env;
 pub mod io;
