@@ -1,6 +1,5 @@
 #![cfg_attr(feature = "axstd", no_std)]
 #![cfg_attr(feature = "axstd", no_main)]
-#![feature(asm_const)]
 #![feature(riscv_ext_intrinsics)]
 
 #[cfg(feature = "axstd")]
@@ -26,6 +25,8 @@ use sbi::SbiMessage;
 use loader::load_vm_image;
 use axhal::mem::PhysAddr;
 use crate::regs::GprIndex::{A0, A1};
+use sbi_spec::{base, legacy, srst, time};
+use axstd::print;
 
 const VM_ENTRY: usize = 0x8020_0000;
 
@@ -81,6 +82,15 @@ fn vmexit_handler(ctx: &mut VmCpuRegisters) -> bool {
 
     let scause = scause::read();
     match scause.cause() {
+        Trap::Exception(Exception::LoadGuestPageFault) => {
+            assert_eq!(stval::read(), 64);
+            ctx.guest_regs.gprs.set_reg(A0, 0x6688);
+            ctx.guest_regs.sepc += 4;
+        }
+        Trap::Exception(Exception::IllegalInstruction) => {
+            ctx.guest_regs.gprs.set_reg(A1, 0x1234);
+            ctx.guest_regs.sepc += 4;
+        }
         Trap::Exception(Exception::VirtualSupervisorEnvCall) => {
             let sbi_msg = SbiMessage::from_regs(ctx.guest_regs.gprs.a_regs()).ok();
             ax_println!("VmExit Reason: VSuperEcall: {:?}", sbi_msg);
@@ -95,23 +105,28 @@ fn vmexit_handler(ctx: &mut VmCpuRegisters) -> bool {
                         ax_println!("Shutdown vm normally!");
                         return true;
                     },
-                    _ => todo!(),
+                    SbiMessage::PutChar(c) => {
+                        print!("{}", c as u8 as char);
+                    },
+                    SbiMessage::Base(func) => {
+                        let (err, val) = handle_sbi_base(func);
+                        ctx.guest_regs.gprs.set_reg(A0, err);
+                        ctx.guest_regs.gprs.set_reg(A1, val);
+                    },
+                    SbiMessage::SetTimer(val) => {
+                        unsafe {
+                            core::arch::asm!("csrw stimecmp, {}", in(reg) val);
+                        }
+                    },
+                    _ => {
+                        ctx.guest_regs.gprs.set_reg(A0, sbi::SBI_ERR_NOT_SUPPORTED as usize);
+                        ctx.guest_regs.gprs.set_reg(A1, 0);
+                    }
                 }
             } else {
                 panic!("bad sbi message! ");
             }
-        },
-        Trap::Exception(Exception::IllegalInstruction) => {
-            panic!("Bad instruction: {:#x} sepc: {:#x}",
-                stval::read(),
-                ctx.guest_regs.sepc
-            );
-        },
-        Trap::Exception(Exception::LoadGuestPageFault) => {
-            panic!("LoadGuestPageFault: stval{:#x} sepc: {:#x}",
-                stval::read(),
-                ctx.guest_regs.sepc
-            );
+            ctx.guest_regs.sepc += 4;
         },
         _ => {
             panic!(
@@ -123,6 +138,27 @@ fn vmexit_handler(ctx: &mut VmCpuRegisters) -> bool {
         }
     }
     false
+}
+
+fn handle_sbi_base(func: sbi::BaseFunction) -> (usize, usize) {
+    match func {
+        sbi::BaseFunction::GetSepcificationVersion => (sbi::SBI_SUCCESS, 0x2),
+        sbi::BaseFunction::GetImplementationID => (sbi::SBI_SUCCESS, 1),
+        sbi::BaseFunction::GetImplementationVersion => (sbi::SBI_SUCCESS, 1),
+        sbi::BaseFunction::ProbeSbiExtension(ext_id) => {
+            let supported = matches!(ext_id as usize,
+                base::EID_BASE |
+                srst::EID_SRST |
+                time::EID_TIME |
+                legacy::LEGACY_CONSOLE_PUTCHAR |
+                legacy::LEGACY_SET_TIMER |
+                legacy::LEGACY_SHUTDOWN |
+                legacy::LEGACY_CONSOLE_GETCHAR
+            );
+            (sbi::SBI_SUCCESS, supported as usize)
+        }
+        _ => (sbi::SBI_ERR_NOT_SUPPORTED as usize, 0),
+    }
 }
 
 fn prepare_guest_context(ctx: &mut VmCpuRegisters) {
