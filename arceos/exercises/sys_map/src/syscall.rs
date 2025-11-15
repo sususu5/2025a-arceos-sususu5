@@ -8,6 +8,8 @@ use axtask::current;
 use axtask::TaskExtRef;
 use axhal::paging::MappingFlags;
 use arceos_posix_api as api;
+use memory_addr::{PAGE_SIZE_4K, VirtAddr, VirtAddrRange, is_aligned_4k};
+extern crate alloc;
 
 const SYS_IOCTL: usize = 29;
 const SYS_OPENAT: usize = 56;
@@ -131,16 +133,80 @@ fn handle_syscall(tf: &TrapFrame, syscall_num: usize) -> isize {
     ret
 }
 
-#[allow(unused_variables)]
 fn sys_mmap(
     addr: *mut usize,
     length: usize,
     prot: i32,
     flags: i32,
     fd: i32,
-    _offset: isize,
+    offset: isize,
 ) -> isize {
-    unimplemented!("no sys_mmap!");
+    syscall_body!(sys_mmap, {
+        if length == 0 {
+            return Err(LinuxError::EINVAL);
+        }
+
+        let task = current();
+        let mut aspace = task.task_ext().aspace.lock();
+        let prot = MmapProt::from_bits_truncate(prot);
+        let flags = MmapFlags::from_bits_truncate(flags);
+        let mapping_flags: MappingFlags = prot.into();
+
+        let aligned_length = (length + PAGE_SIZE_4K - 1) & !(PAGE_SIZE_4K - 1);
+
+        let addr_val = addr as usize;
+        let hint_addr = if addr_val == 0 {
+            aspace.base()
+        } else {
+            if !is_aligned_4k(addr_val) {
+                return Err(LinuxError::EINVAL);
+            }
+            VirtAddr::from(addr_val)
+        };
+
+        let vaddr = if addr_val != 0 && flags.contains(MmapFlags::MAP_FIXED) {
+            if !aspace.contains_range(hint_addr, aligned_length) {
+                return Err(LinuxError::EINVAL);
+            }
+            hint_addr
+        } else {
+            let limit = VirtAddrRange::from_start_size(aspace.base(), aspace.size());
+            aspace
+                .find_free_area(hint_addr, aligned_length, limit)
+                .ok_or(LinuxError::ENOMEM)?
+        };
+
+        if flags.contains(MmapFlags::MAP_ANONYMOUS) {
+            // Anonymous mapping: only allocate memory without mapping to a file
+            aspace.map_alloc(vaddr, aligned_length, mapping_flags, true)?;
+            Ok(vaddr.as_usize())
+        } else {
+            aspace.map_alloc(vaddr, aligned_length, mapping_flags, true)?;
+
+            if offset != 0 {
+                let seek_result = api::sys_lseek(fd, offset as i64, 0);
+                if seek_result < 0 {
+                    return Err(LinuxError::EIO);
+                }
+            }
+            
+            let read_len = length.min(1024 * 1024);
+            let mut file_buf = alloc::vec![0u8; read_len];
+            
+            let read_size = api::sys_read(fd, file_buf.as_mut_ptr() as *mut c_void, read_len);
+            if read_size < 0 {
+                return Err(LinuxError::EIO);
+            }
+            
+            let read_size = read_size as usize;
+            if read_size > 0 {
+                let write_len = read_size.min(length);
+                aspace.write(vaddr, &file_buf[..write_len])?;
+            }
+
+            Ok(vaddr.as_usize())
+        }
+    })
 }
 
 fn sys_openat(dfd: c_int, fname: *const c_char, flags: c_int, mode: api::ctypes::mode_t) -> isize {
